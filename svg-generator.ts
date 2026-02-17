@@ -163,7 +163,7 @@ export function bezierSegmentsToPath(
 export function optimizePathString(d: string): string {
   // Simple optimization: convert to relative commands where shorter
   const commands = d.split(/(?=[MLHVCSQTAZmlhvcsqtaz])/);
-  
+
   let optimized = '';
   let currentX = 0, currentY = 0;
   let firstMove = true;
@@ -437,7 +437,7 @@ function optimizeSVG(svg: string): string {
     // Remove space before numbers after commands
     optimized = optimized.replace(/([MLHVCSQTAZmlhvcsqtaz])\s+(-?\d)/g, '$1$2');
     // Remove unnecessary decimals
-    optimized = optimized.replace(/\.(\d{3,})/g, (_, digits) => {
+    optimized = optimized.replace(/\.(\d{3,})/g, (_: string, digits: string) => {
       const trimmed = digits.replace(/0+$/, '');
       return trimmed ? `.${trimmed}` : '';
     });

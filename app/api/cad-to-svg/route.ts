@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+// Allow large request bodies for image data
+export const runtime = 'nodejs';
+export const maxDuration = 60;
+
 // Types
 interface Color {
   r: number;
@@ -64,14 +68,12 @@ function gaussianBlur(
   const kernel: number[] = [];
   let sum = 0;
 
+  // Build a 1D Gaussian kernel for separable convolution
   for (let i = 0; i < kernelSize; i++) {
-    for (let j = 0; j < kernelSize; j++) {
-      const x = i - halfKernel;
-      const y = j - halfKernel;
-      const value = Math.exp(-(x * x + y * y) / (2 * sigma * sigma));
-      kernel.push(value);
-      sum += value;
-    }
+    const x = i - halfKernel;
+    const value = Math.exp(-(x * x) / (2 * sigma * sigma));
+    kernel.push(value);
+    sum += value;
   }
 
   for (let i = 0; i < kernel.length; i++) {
@@ -132,7 +134,7 @@ function sobelEdgeDetection(
   height: number
 ): { magnitude: Float32Array; direction: Float32Array } {
   const grayData = new Uint8ClampedArray(width * height);
-  
+
   for (let i = 0; i < data.length; i += 4) {
     grayData[i / 4] = toGrayscale(data[i], data[i + 1], data[i + 2]);
   }
@@ -364,6 +366,27 @@ function traceContour(
   return points;
 }
 
+function isBoundaryPixel(
+  binary: Uint8ClampedArray,
+  width: number,
+  height: number,
+  x: number,
+  y: number
+): boolean {
+  // A boundary pixel is a foreground pixel adjacent to at least one background pixel
+  const idx = y * width + x;
+  if (binary[idx] === 0) return false;
+
+  if (x === 0 || x === width - 1 || y === 0 || y === height - 1) return true;
+
+  if (binary[idx - 1] === 0) return true; // left
+  if (binary[idx + 1] === 0) return true; // right
+  if (binary[(y - 1) * width + x] === 0) return true; // top
+  if (binary[(y + 1) * width + x] === 0) return true; // bottom
+
+  return false;
+}
+
 function detectContours(
   binary: Uint8ClampedArray,
   width: number,
@@ -376,7 +399,9 @@ function detectContours(
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
       if (binary[idx] === 0 || visited[idx]) continue;
-      if (x > 0 && binary[idx - 1] > 0) continue;
+
+      // Only start tracing from boundary pixels
+      if (!isBoundaryPixel(binary, width, height, x, y)) continue;
 
       const contour = traceContour(binary, width, height, x, y, visited);
       if (contour.length >= 3) {
@@ -718,6 +743,7 @@ export async function POST(request: NextRequest) {
     const backgroundColor = detectBackgroundColor(data, width, height);
     const lineColors = extractLineColors(data, width, height, backgroundColor);
 
+
     // Edge detection
     let edges: Uint8ClampedArray;
     if (opts.edgeDetection!.method === 'canny') {
@@ -734,15 +760,19 @@ export async function POST(request: NextRequest) {
       edges = cannyEdgeDetection(data, width, height, 50, 150, 1.4);
     }
 
-    // Morphological close to clean edges
-    const cleanedEdges = morphClose(edges, width, height);
 
-    // Contour detection
-    let contours = detectContours(cleanedEdges, width, height);
+    // Contour detection (skip morphClose as it thickens edges and breaks contour start detection)
+    let contours = detectContours(edges, width, height);
 
-    // Filter by minimum area
+
+    // Filter by minimum area or minimum point count
+    // Edge-traced contours may have small shoelace area but large perimeter
     const minArea = opts.contourDetection!.minArea!;
     contours = contours.filter(points => {
+      // Accept contours with enough points (perimeter-based)
+      if (points.length >= Math.max(minArea, 4)) return true;
+
+      // Also accept by enclosed area (shoelace formula)
       let area = 0;
       const n = points.length;
       for (let i = 0; i < n; i++) {
@@ -753,17 +783,18 @@ export async function POST(request: NextRequest) {
       return Math.abs(area) / 2 >= minArea;
     });
 
+
     // Simplify paths
     const tolerance = opts.contourDetection!.tolerance!;
     contours = contours.map(points => douglasPeucker(points, tolerance));
 
     // Assign colors to contours
     const colorGroups = new Map<string, { color: Color; count: number }>();
-    
+
     const coloredContours = contours.map(points => {
       const sampledColor = sampleColorAlongPath(data, width, height, points);
       const assignedColor = findNearestColor(sampledColor, lineColors);
-      
+
       const key = `${assignedColor.r}-${assignedColor.g}-${assignedColor.b}`;
       const existing = colorGroups.get(key);
       if (existing) {
@@ -771,7 +802,7 @@ export async function POST(request: NextRequest) {
       } else {
         colorGroups.set(key, { color: assignedColor, count: 1 });
       }
-      
+
       return { points, color: assignedColor };
     });
 

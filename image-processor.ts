@@ -19,7 +19,7 @@ import {
 /**
  * Load image from various sources
  */
-export async function loadImage(source: string | Blob | File | HTMLImageElement): Promise<HTMLImageElement> {
+export async function loadImage(source: any): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     if (source instanceof HTMLImageElement) {
       if (source.complete) {
@@ -166,7 +166,7 @@ export function colorToRgba(color: Color): string {
  */
 export function grayscale(imageData: CADImageData): Uint8ClampedArray {
   const result = new Uint8ClampedArray(imageData.width * imageData.height);
-  
+
   for (let i = 0; i < imageData.data.length; i += 4) {
     const pixelIndex = i / 4;
     result[pixelIndex] = toGrayscale({
@@ -187,7 +187,7 @@ export function gaussianBlur(imageData: CADImageData, sigma: number = 1.4): CADI
   const width = imageData.width;
   const height = imageData.height;
   const result = createImageData(width, height);
-  
+
   // Create Gaussian kernel
   const kernelSize = Math.ceil(sigma * 3) * 2 + 1;
   const kernel: number[] = [];
@@ -216,12 +216,12 @@ export function gaussianBlur(imageData: CADImageData, sigma: number = 1.4): CADI
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       let r = 0, g = 0, b = 0, a = 0;
-      
+
       for (let k = -halfKernel; k <= halfKernel; k++) {
         const xx = Math.min(Math.max(x + k, 0), width - 1);
         const idx = (y * width + xx) * 4;
         const weight = kernel[k + halfKernel];
-        
+
         r += imageData.data[idx] * weight;
         g += imageData.data[idx + 1] * weight;
         b += imageData.data[idx + 2] * weight;
@@ -240,12 +240,12 @@ export function gaussianBlur(imageData: CADImageData, sigma: number = 1.4): CADI
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       let r = 0, g = 0, b = 0, a = 0;
-      
+
       for (let k = -halfKernel; k <= halfKernel; k++) {
         const yy = Math.min(Math.max(y + k, 0), height - 1);
         const idx = (yy * width + x) * 4;
         const weight = kernel[k + halfKernel];
-        
+
         r += temp[idx] * weight;
         g += temp[idx + 1] * weight;
         b += temp[idx + 2] * weight;
@@ -283,7 +283,7 @@ export function medianFilter(imageData: CADImageData, kernelSize: number = 3): C
           const yy = Math.min(Math.max(y + ky, 0), height - 1);
           const xx = Math.min(Math.max(x + kx, 0), width - 1);
           const idx = (yy * width + xx) * 4;
-          
+
           rValues.push(imageData.data[idx]);
           gValues.push(imageData.data[idx + 1]);
           bValues.push(imageData.data[idx + 2]);
@@ -296,7 +296,7 @@ export function medianFilter(imageData: CADImageData, kernelSize: number = 3): C
 
       const mid = Math.floor(rValues.length / 2);
       const idx = (y * width + x) * 4;
-      
+
       result.data[idx] = rValues[mid];
       result.data[idx + 1] = gValues[mid];
       result.data[idx + 2] = bValues[mid];
@@ -341,7 +341,7 @@ export function adaptiveThreshold(
 
   // Compute integral image for efficient mean calculation
   const integral = new Float64Array((width + 1) * (height + 1));
-  
+
   for (let y = 1; y <= height; y++) {
     let rowSum = 0;
     for (let x = 1; x <= width; x++) {
@@ -366,7 +366,7 @@ export function adaptiveThreshold(
       const y2 = Math.min(height - 1, y + halfBlock);
 
       const count = (x2 - x1 + 1) * (y2 - y1 + 1);
-      const sum = 
+      const sum =
         integral[(y2 + 1) * (width + 1) + (x2 + 1)] -
         integral[y1 * (width + 1) + (x2 + 1)] -
         integral[(y2 + 1) * (width + 1) + x1] +
@@ -416,7 +416,7 @@ export function sobelEdgeDetection(imageData: CADImageData): GradientData {
         for (let kx = -1; kx <= 1; kx++) {
           const idx = (y + ky) * width + (x + kx);
           const kernelIdx = (ky + 1) * 3 + (kx + 1);
-          
+
           gx += grayData[idx] * sobelX[kernelIdx];
           gy += grayData[idx] * sobelY[kernelIdx];
         }
@@ -454,7 +454,7 @@ export function prewittEdgeDetection(imageData: CADImageData): GradientData {
         for (let kx = -1; kx <= 1; kx++) {
           const idx = (y + ky) * width + (x + kx);
           const kernelIdx = (ky + 1) * 3 + (kx + 1);
-          
+
           gx += grayData[idx] * prewittX[kernelIdx];
           gy += grayData[idx] * prewittY[kernelIdx];
         }
@@ -520,7 +520,7 @@ export function laplacianEdgeDetection(imageData: CADImageData): GradientData {
         for (let kx = -1; kx <= 1; kx++) {
           const idx = (y + ky) * width + (x + kx);
           const kernelIdx = (ky + 1) * 3 + (kx + 1);
-          
+
           value += grayData[idx] * laplacian[kernelIdx];
         }
       }
@@ -682,7 +682,7 @@ export function detectEdges(
   switch (method) {
     case 'canny':
       return cannyEdgeDetection(processedImage, lowThreshold, highThreshold, sigma);
-    
+
     case 'sobel': {
       const gradient = sobelEdgeDetection(processedImage);
       const result = new Uint8ClampedArray(gradient.magnitude.length);
@@ -693,7 +693,7 @@ export function detectEdges(
       }
       return result;
     }
-    
+
     case 'prewitt': {
       const gradient = prewittEdgeDetection(processedImage);
       const result = new Uint8ClampedArray(gradient.magnitude.length);
@@ -704,7 +704,7 @@ export function detectEdges(
       }
       return result;
     }
-    
+
     case 'roberts': {
       const gradient = robertsEdgeDetection(processedImage);
       const result = new Uint8ClampedArray(gradient.magnitude.length);
@@ -715,7 +715,7 @@ export function detectEdges(
       }
       return result;
     }
-    
+
     case 'laplacian': {
       const gradient = laplacianEdgeDetection(processedImage);
       const result = new Uint8ClampedArray(gradient.magnitude.length);
@@ -726,7 +726,7 @@ export function detectEdges(
       }
       return result;
     }
-    
+
     default:
       throw new Error(`Unknown edge detection method: ${method}`);
   }
@@ -764,7 +764,7 @@ export function dilate(binary: Uint8ClampedArray, width: number, height: number,
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
         const idx = y * width + x;
-        
+
         if (result[idx] > 0) continue;
 
         // Check 8-connected neighborhood
@@ -797,7 +797,7 @@ export function erode(binary: Uint8ClampedArray, width: number, height: number, 
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
         const idx = y * width + x;
-        
+
         if (result[idx] === 0) continue;
 
         // Check 8-connected neighborhood

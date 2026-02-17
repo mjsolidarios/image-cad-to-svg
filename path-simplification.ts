@@ -31,14 +31,14 @@ function perpendicularDistance(
 
   // Calculate perpendicular distance
   const t = ((point.x - lineStart.x) * dx + (point.y - lineStart.y) * dy) / lineLengthSq;
-  
+
   // Project point onto line
   const projX = lineStart.x + t * dx;
   const projY = lineStart.y + t * dy;
 
   // Clamp projection to line segment
   let distX: number, distY: number;
-  
+
   if (t < 0) {
     distX = point.x - lineStart.x;
     distY = point.y - lineStart.y;
@@ -242,7 +242,7 @@ export function reumannWitkam(points: Point[], tolerance: number): Point[] {
 
   for (let i = 2; i < points.length; i++) {
     const dist = perpendicularDistance(points[i], firstPoint, points[keyIndex + 1]);
-    
+
     if (dist > tolerance) {
       result.push(points[i]);
       firstPoint = points[keyIndex + 1];
@@ -365,13 +365,13 @@ export function gaussianSmooth(points: Point[], sigma: number = 1.0): Point[] {
 
     for (let j = -halfWindow; j <= halfWindow; j++) {
       let idx = i + j;
-      
+
       // Handle boundary (mirror)
       if (idx < 0) idx = -idx;
       if (idx >= points.length) idx = 2 * points.length - idx - 2;
-      
+
       idx = Math.max(0, Math.min(points.length - 1, idx));
-      
+
       sumX += points[idx].x * weights[j + halfWindow];
       sumY += points[idx].y * weights[j + halfWindow];
     }
@@ -386,7 +386,7 @@ export function gaussianSmooth(points: Point[], sigma: number = 1.0): Point[] {
 // Bezier Curve Fitting
 // ============================================================================
 
-interface BezierSegment {
+export interface BezierSegment {
   start: Point;
   control1: Point;
   control2: Point;
@@ -461,14 +461,14 @@ function fitCubicBezierRecursive(
 
   // Subdivide at point of max error
   const tanCenter = computeTangent(points[splitPoint - 1], points[splitPoint + 1]);
-  
+
   fitCubicBezierRecursive(points, first, splitPoint, tangent1, tanCenter, error, segments);
   fitCubicBezierRecursive(points, splitPoint, last, tanCenter, tangent2, error, segments);
 }
 
 function chordLengthParameterize(points: Point[], first: number, last: number): number[] {
   const u = [0];
-  
+
   for (let i = first + 1; i <= last; i++) {
     const dx = points[i].x - points[i - 1].x;
     const dy = points[i].y - points[i - 1].y;
