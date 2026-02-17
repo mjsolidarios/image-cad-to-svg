@@ -277,53 +277,13 @@ function cannyEdgeDetection(
   return doubleThreshold(suppressed, width, height, lowThreshold, highThreshold);
 }
 
-// Morphological close
-function morphClose(
-  binary: Uint8ClampedArray,
-  width: number,
-  height: number
-): Uint8ClampedArray {
-  // Dilate
-  const dilated = new Uint8ClampedArray(binary.length);
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const idx = y * width + x;
-      if (binary[idx] > 0) {
-        for (let ky = -1; ky <= 1; ky++) {
-          for (let kx = -1; kx <= 1; kx++) {
-            dilated[(y + ky) * width + (x + kx)] = 255;
-          }
-        }
-      }
-    }
-  }
-
-  // Erode
-  const result = new Uint8ClampedArray(dilated.length);
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const idx = y * width + x;
-      let allSet = true;
-      for (let ky = -1; ky <= 1 && allSet; ky++) {
-        for (let kx = -1; kx <= 1; kx++) {
-          if (dilated[(y + ky) * width + (x + kx)] === 0) {
-            allSet = false;
-            break;
-          }
-        }
-      }
-      result[idx] = allSet ? 255 : 0;
-    }
-  }
-
-  return result;
-}
-
 // ============================================================================
-// Contour Detection
+// Contour Detection - Edge Chain Tracing (single-line output)
 // ============================================================================
 
-function traceContour(
+// Trace a chain of connected edge pixels (walks ALONG the edge, not around it)
+// This produces a single polyline per edge chain instead of a double-outline loop.
+function traceEdgeChain(
   binary: Uint8ClampedArray,
   width: number,
   height: number,
@@ -332,59 +292,60 @@ function traceContour(
   visited: Uint8ClampedArray
 ): Point[] {
   const points: Point[] = [];
+  // 8-connectivity directions
   const dx = [1, 1, 0, -1, -1, -1, 0, 1];
   const dy = [0, 1, 1, 1, 0, -1, -1, -1];
 
   let x = startX;
   let y = startY;
-  let dir = 0;
 
-  do {
+  while (true) {
     points.push({ x, y });
     visited[y * width + x] = 1;
 
+    // Find next unvisited connected edge pixel
     let found = false;
-    const startDir = (dir + 5) % 8;
-
     for (let i = 0; i < 8; i++) {
-      const checkDir = (startDir + i) % 8;
-      const nx = x + dx[checkDir];
-      const ny = y + dy[checkDir];
-
-      if (nx >= 0 && nx < width && ny >= 0 && ny < height && binary[ny * width + nx] > 0) {
+      const nx = x + dx[i];
+      const ny = y + dy[i];
+      if (
+        nx >= 0 && nx < width && ny >= 0 && ny < height &&
+        binary[ny * width + nx] > 0 &&
+        !visited[ny * width + nx]
+      ) {
         x = nx;
         y = ny;
-        dir = checkDir;
         found = true;
         break;
       }
     }
 
     if (!found) break;
-  } while (!(x === startX && y === startY) && points.length < width * height);
+    if (points.length > width * height) break; // safety limit
+  }
 
   return points;
 }
 
-function isBoundaryPixel(
+// Count how many 8-connected edge neighbors a pixel has
+function countEdgeNeighbors(
   binary: Uint8ClampedArray,
   width: number,
   height: number,
   x: number,
   y: number
-): boolean {
-  // A boundary pixel is a foreground pixel adjacent to at least one background pixel
-  const idx = y * width + x;
-  if (binary[idx] === 0) return false;
-
-  if (x === 0 || x === width - 1 || y === 0 || y === height - 1) return true;
-
-  if (binary[idx - 1] === 0) return true; // left
-  if (binary[idx + 1] === 0) return true; // right
-  if (binary[(y - 1) * width + x] === 0) return true; // top
-  if (binary[(y + 1) * width + x] === 0) return true; // bottom
-
-  return false;
+): number {
+  const dx = [1, 1, 0, -1, -1, -1, 0, 1];
+  const dy = [0, 1, 1, 1, 0, -1, -1, -1];
+  let count = 0;
+  for (let i = 0; i < 8; i++) {
+    const nx = x + dx[i];
+    const ny = y + dy[i];
+    if (nx >= 0 && nx < width && ny >= 0 && ny < height && binary[ny * width + nx] > 0) {
+      count++;
+    }
+  }
+  return count;
 }
 
 function detectContours(
@@ -395,17 +356,33 @@ function detectContours(
   const contours: Point[][] = [];
   const visited = new Uint8ClampedArray(width * height);
 
+  // First pass: start tracing from chain endpoints (pixels with exactly 1 neighbor)
+  // This ensures we trace from one end to the other for open chains
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const idx = y * width + x;
       if (binary[idx] === 0 || visited[idx]) continue;
 
-      // Only start tracing from boundary pixels
-      if (!isBoundaryPixel(binary, width, height, x, y)) continue;
+      const neighbors = countEdgeNeighbors(binary, width, height, x, y);
+      if (neighbors === 1) {
+        const chain = traceEdgeChain(binary, width, height, x, y, visited);
+        if (chain.length >= 3) {
+          contours.push(chain);
+        }
+      }
+    }
+  }
 
-      const contour = traceContour(binary, width, height, x, y, visited);
-      if (contour.length >= 3) {
-        contours.push(contour);
+  // Second pass: pick up any remaining closed loops
+  // (every pixel in a closed loop has 2 neighbors, so no endpoints exist)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (binary[idx] === 0 || visited[idx]) continue;
+
+      const chain = traceEdgeChain(binary, width, height, x, y, visited);
+      if (chain.length >= 3) {
+        contours.push(chain);
       }
     }
   }
@@ -743,7 +720,6 @@ export async function POST(request: NextRequest) {
     const backgroundColor = detectBackgroundColor(data, width, height);
     const lineColors = extractLineColors(data, width, height, backgroundColor);
 
-
     // Edge detection
     let edges: Uint8ClampedArray;
     if (opts.edgeDetection!.method === 'canny') {
@@ -756,33 +732,15 @@ export async function POST(request: NextRequest) {
         opts.edgeDetection!.gaussianBlur!
       );
     } else {
-      // Fallback to canny for other methods
       edges = cannyEdgeDetection(data, width, height, 50, 150, 1.4);
     }
 
-
-    // Contour detection (skip morphClose as it thickens edges and breaks contour start detection)
+    // Contour detection via edge chain tracing (produces single-line paths)
     let contours = detectContours(edges, width, height);
 
-
-    // Filter by minimum area or minimum point count
-    // Edge-traced contours may have small shoelace area but large perimeter
+    // Filter by minimum point count (perimeter-based for edge chains)
     const minArea = opts.contourDetection!.minArea!;
-    contours = contours.filter(points => {
-      // Accept contours with enough points (perimeter-based)
-      if (points.length >= Math.max(minArea, 4)) return true;
-
-      // Also accept by enclosed area (shoelace formula)
-      let area = 0;
-      const n = points.length;
-      for (let i = 0; i < n; i++) {
-        const j = (i + 1) % n;
-        area += points[i].x * points[j].y;
-        area -= points[j].x * points[i].y;
-      }
-      return Math.abs(area) / 2 >= minArea;
-    });
-
+    contours = contours.filter(points => points.length >= Math.max(minArea, 4));
 
     // Simplify paths
     const tolerance = opts.contourDetection!.tolerance!;
@@ -813,7 +771,7 @@ export async function POST(request: NextRequest) {
     let paths = '';
     for (let i = 0; i < coloredContours.length; i++) {
       const { points, color } = coloredContours[i];
-      const d = pointsToPathString(points, true, precision);
+      const d = pointsToPathString(points, false, precision);
       const hexColor = colorToHex(color.r, color.g, color.b);
       paths += `<path d="${d}" stroke="${hexColor}" stroke-width="${strokeWidth}" fill="none"/>\n`;
     }
@@ -835,7 +793,7 @@ ${paths}</svg>`;
       height,
       pathCount: contours.length,
       layerCount: colorGroups.size,
-      conversionTime: 0, // Will be calculated on client
+      conversionTime: 0,
       colorGroups: colorGroupsArray,
     });
 
