@@ -278,6 +278,136 @@ function cannyEdgeDetection(
 }
 
 // ============================================================================
+// Skeletonization (Centerline Tracing)
+// ============================================================================
+
+function binarize(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  threshold: number = 128
+): Uint8ClampedArray {
+  const binary = new Uint8ClampedArray(width * height);
+  for (let i = 0; i < data.length; i += 4) {
+    // Invert: assume input is dark lines on light background
+    // We want lines to be white (1) and background black (0) for thinning
+    const gray = toGrayscale(data[i], data[i + 1], data[i + 2]);
+    binary[i / 4] = gray < threshold ? 1 : 0;
+  }
+  return binary;
+}
+
+function zhangSuenThinning(
+  binary: Uint8ClampedArray,
+  width: number,
+  height: number
+): Uint8ClampedArray {
+  const skeleton = new Uint8ClampedArray(binary);
+  let changed = true;
+
+  const getPixel = (x: number, y: number) => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return 0;
+    return skeleton[y * width + x];
+  };
+
+  const setPixel = (x: number, y: number, val: number) => {
+    skeleton[y * width + x] = val;
+  };
+
+  while (changed) {
+    changed = false;
+    const pixelsToRemove: number[] = [];
+
+    // Step 1
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const p1 = getPixel(x, y);
+        if (p1 === 0) continue;
+
+        const p2 = getPixel(x, y - 1);
+        const p3 = getPixel(x + 1, y - 1);
+        const p4 = getPixel(x + 1, y);
+        const p5 = getPixel(x + 1, y + 1);
+        const p6 = getPixel(x, y + 1);
+        const p7 = getPixel(x - 1, y + 1);
+        const p8 = getPixel(x - 1, y);
+        const p9 = getPixel(x - 1, y - 1);
+
+        const A = (p2 === 0 && p3 === 1 ? 1 : 0) +
+          (p3 === 0 && p4 === 1 ? 1 : 0) +
+          (p4 === 0 && p5 === 1 ? 1 : 0) +
+          (p5 === 0 && p6 === 1 ? 1 : 0) +
+          (p6 === 0 && p7 === 1 ? 1 : 0) +
+          (p7 === 0 && p8 === 1 ? 1 : 0) +
+          (p8 === 0 && p9 === 1 ? 1 : 0) +
+          (p9 === 0 && p2 === 1 ? 1 : 0);
+
+        const B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+
+        const m1 = p2 * p4 * p6;
+        const m2 = p4 * p6 * p8;
+
+        if (A === 1 && (B >= 2 && B <= 6) && m1 === 0 && m2 === 0) {
+          pixelsToRemove.push(y * width + x);
+        }
+      }
+    }
+
+    if (pixelsToRemove.length > 0) {
+      for (const idx of pixelsToRemove) skeleton[idx] = 0;
+      changed = true;
+      pixelsToRemove.length = 0;
+    }
+
+    // Step 2
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const p1 = getPixel(x, y);
+        if (p1 === 0) continue;
+
+        const p2 = getPixel(x, y - 1);
+        const p3 = getPixel(x + 1, y - 1);
+        const p4 = getPixel(x + 1, y);
+        const p5 = getPixel(x + 1, y + 1);
+        const p6 = getPixel(x, y + 1);
+        const p7 = getPixel(x - 1, y + 1);
+        const p8 = getPixel(x - 1, y);
+        const p9 = getPixel(x - 1, y - 1);
+
+        const A = (p2 === 0 && p3 === 1 ? 1 : 0) +
+          (p3 === 0 && p4 === 1 ? 1 : 0) +
+          (p4 === 0 && p5 === 1 ? 1 : 0) +
+          (p5 === 0 && p6 === 1 ? 1 : 0) +
+          (p6 === 0 && p7 === 1 ? 1 : 0) +
+          (p7 === 0 && p8 === 1 ? 1 : 0) +
+          (p8 === 0 && p9 === 1 ? 1 : 0) +
+          (p9 === 0 && p2 === 1 ? 1 : 0);
+
+        const B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+
+        const m1 = p2 * p4 * p8;
+        const m2 = p2 * p6 * p8;
+
+        if (A === 1 && (B >= 2 && B <= 6) && m1 === 0 && m2 === 0) {
+          pixelsToRemove.push(y * width + x);
+        }
+      }
+    }
+
+    if (pixelsToRemove.length > 0) {
+      for (const idx of pixelsToRemove) skeleton[idx] = 0;
+      changed = true;
+    }
+  }
+
+  // Convert binary 1/0 back to 255/0 for consistency with other functions
+  for (let i = 0; i < skeleton.length; i++) {
+    skeleton[i] = skeleton[i] * 255;
+  }
+  return skeleton;
+}
+
+// ============================================================================
 // Contour Detection - Edge Chain Tracing (single-line output)
 // ============================================================================
 
@@ -681,7 +811,7 @@ export async function POST(request: NextRequest) {
 
     const opts: ConversionOptions = {
       edgeDetection: {
-        method: 'canny',
+        method: 'skeleton', // Default to skeleton for better single-line output
         lowThreshold: 50,
         highThreshold: 150,
         gaussianBlur: 1.4,
@@ -720,9 +850,22 @@ export async function POST(request: NextRequest) {
     const backgroundColor = detectBackgroundColor(data, width, height);
     const lineColors = extractLineColors(data, width, height, backgroundColor);
 
-    // Edge detection
+    // Edge extraction or Skeletonization
     let edges: Uint8ClampedArray;
-    if (opts.edgeDetection!.method === 'canny') {
+
+    // Check method - default to skeleton if not specified
+    const method = opts.edgeDetection!.method || 'skeleton';
+
+    if (method === 'skeleton') {
+      // 1. Binarize (Thresholding)
+      // Invert logic: lines are dark, background is light -> lines become 1, background 0
+      const binary = binarize(data, width, height, 128);
+
+      // 2. Skeletonize (Zhang-Suen Thinning)
+      edges = zhangSuenThinning(binary, width, height);
+
+    } else {
+      // 1. Canny Edge Detection (fallback)
       edges = cannyEdgeDetection(
         data,
         width,
@@ -731,8 +874,6 @@ export async function POST(request: NextRequest) {
         opts.edgeDetection!.highThreshold!,
         opts.edgeDetection!.gaussianBlur!
       );
-    } else {
-      edges = cannyEdgeDetection(data, width, height, 50, 150, 1.4);
     }
 
     // Contour detection via edge chain tracing (produces single-line paths)
