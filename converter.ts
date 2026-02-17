@@ -15,6 +15,7 @@ import {
   ImageData as CADImageData,
   CADConverterError,
   ErrorCodes,
+  RefinementScore,
 } from './types';
 import {
   loadImage,
@@ -46,6 +47,9 @@ import {
   detectCADLineColors,
   groupPathsBySimilarColor,
 } from './color-analyzer';
+import {
+  refineConversion,
+} from './svg-refiner';
 
 // ============================================================================
 // Default Options
@@ -85,6 +89,15 @@ const DEFAULT_OPTIONS: ConversionOptions = {
   pathMergeThreshold: 2,
   smoothCurves: false,
   curveTension: 0.5,
+  refinement: {
+    enabled: true,
+    targetAccuracy: 0.85,
+    maxIterations: 3,
+    snapRadius: 3,
+    gapFillMinCluster: 20,
+    spuriousThreshold: 0.7,
+    distanceTolerance: 2,
+  },
 };
 
 // ============================================================================
@@ -185,6 +198,28 @@ export class CADToSVGConverter {
 
       this.reportProgress('path-simplification', 100, 'Path simplification complete');
 
+      // Stage 5.5: Refinement (accuracy validation & correction)
+      let refinementScore: RefinementScore | undefined;
+      if (mergedOptions.refinement?.enabled !== false) {
+        this.reportProgress('refinement', 0, 'Refining paths for accuracy...');
+
+        const refinementResult = refineConversion(
+          paths,
+          cleanedEdges,
+          imageData.width,
+          imageData.height,
+          mergedOptions.refinement
+        );
+
+        paths = refinementResult.paths;
+        refinementScore = refinementResult.afterScore;
+
+        this.reportProgress('refinement', 100,
+          `Refinement complete: F1=${refinementResult.afterScore.f1Score.toFixed(3)} ` +
+          `(${refinementResult.iterationsUsed} iterations, ${refinementResult.refinementTime.toFixed(0)}ms)`
+        );
+      }
+
       // Stage 6: SVG generation
       this.reportProgress('svg-generation', 0, 'Generating SVG...');
 
@@ -225,6 +260,7 @@ export class CADToSVGConverter {
           conversionTime,
           pathCount: paths.length,
           layerCount: layers.length,
+          refinement: refinementScore,
         },
       };
 
@@ -276,6 +312,27 @@ export class CADToSVGConverter {
 
     paths = this.simplifyPaths(paths, mergedOptions);
 
+    // Refinement step
+    let refinementScore: RefinementScore | undefined;
+    if (mergedOptions.refinement?.enabled !== false) {
+      this.reportProgress('refinement', 0, 'Refining paths for accuracy...');
+
+      const refinementResult = refineConversion(
+        paths,
+        edges,
+        width,
+        height,
+        mergedOptions.refinement
+      );
+
+      paths = refinementResult.paths;
+      refinementScore = refinementResult.afterScore;
+
+      this.reportProgress('refinement', 100,
+        `Refinement complete: F1=${refinementResult.afterScore.f1Score.toFixed(3)}`
+      );
+    }
+
     // Create layers
     let layers: Layer[] = [];
     if (mergedOptions.detectLayers) {
@@ -307,6 +364,7 @@ export class CADToSVGConverter {
         conversionTime,
         pathCount: paths.length,
         layerCount: layers.length,
+        refinement: refinementScore,
       },
     };
   }

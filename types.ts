@@ -168,37 +168,91 @@ export interface SVGMetadata {
 }
 
 // ============================================================================
+// Refinement Types
+// ============================================================================
+
+export interface RefinementOptions {
+  /** Whether refinement is enabled. Default: true */
+  enabled?: boolean;
+  /** F1 score target (0-1). Default: 0.85 */
+  targetAccuracy?: number;
+  /** Maximum refinement iterations. Default: 3 */
+  maxIterations?: number;
+  /** Pixel radius for snap-to-edge correction. Default: 3 */
+  snapRadius?: number;
+  /** Minimum cluster size to trigger gap filling. Default: 20 */
+  gapFillMinCluster?: number;
+  /** Fraction of unmatched points to consider a path spurious. Default: 0.7 */
+  spuriousThreshold?: number;
+  /** Pixel tolerance for edge matching. Default: 2 */
+  distanceTolerance?: number;
+}
+
+export interface RefinementScore {
+  /** Fraction of SVG edge pixels near a reference edge (0-1) */
+  precision: number;
+  /** Fraction of reference edge pixels near an SVG edge (0-1) */
+  recall: number;
+  /** Harmonic mean of precision and recall (0-1) */
+  f1Score: number;
+  /** Average pixel distance from SVG edges to nearest reference edge */
+  meanDistanceError: number;
+  /** Number of SVG pixels matched to reference */
+  matchedPixels: number;
+  /** Total SVG edge pixels */
+  totalSvgPixels: number;
+  /** Total reference edge pixels */
+  totalRefPixels: number;
+}
+
+export interface RefinementResult {
+  /** Refined paths */
+  paths: PathData[];
+  /** Accuracy score before refinement */
+  beforeScore: RefinementScore;
+  /** Accuracy score after refinement */
+  afterScore: RefinementScore;
+  /** Number of refinement iterations used */
+  iterationsUsed: number;
+  /** Refinement time in milliseconds */
+  refinementTime: number;
+}
+
+// ============================================================================
 // Conversion Options
 // ============================================================================
 
 export interface ConversionOptions {
   // Edge Detection
   edgeDetection?: EdgeDetectionOptions;
-  
+
   // Contour Detection
   contourDetection?: ContourDetectionOptions;
-  
+
   // Color Extraction
   colorExtraction?: ColorExtractionOptions;
-  
+
   // SVG Generation
   svg?: SVGOptions;
-  
+
   // Metadata
   metadata?: SVGMetadata;
-  
+
   // General
   invertColors?: boolean;
   backgroundColor?: Color;
   targetDPI?: number;
   preserveAspectRatio?: boolean;
-  
+
   // CAD-specific
   detectLayers?: boolean;
   mergeSimilarPaths?: boolean;
   pathMergeThreshold?: number;
   smoothCurves?: boolean;
   curveTension?: number;
+
+  // Refinement
+  refinement?: RefinementOptions;
 }
 
 export interface ConversionResult {
@@ -213,6 +267,7 @@ export interface ConversionResult {
     conversionTime: number;
     pathCount: number;
     layerCount: number;
+    refinement?: RefinementScore;
   };
 }
 
@@ -226,7 +281,7 @@ export interface WorkerMessage {
 }
 
 export interface ProcessingProgress {
-  stage: 'loading' | 'edge-detection' | 'contour-tracing' | 'path-simplification' | 'svg-generation';
+  stage: 'loading' | 'edge-detection' | 'contour-tracing' | 'path-simplification' | 'refinement' | 'svg-generation';
   progress: number;
   message: string;
 }

@@ -111,6 +111,19 @@ export {
   hslToRgb,
 } from './color-analyzer';
 
+// SVG refinement utilities
+export {
+  computeDistanceTransform,
+  rasterizePaths,
+  computeAccuracy,
+  snapPathsToEdges,
+  removeSpuriousPaths,
+  fillGaps,
+  adaptiveResimplify,
+  refineConversion,
+  DEFAULT_REFINEMENT_OPTIONS,
+} from './svg-refiner';
+
 // Version
 export const VERSION = '1.0.0';
 
@@ -149,7 +162,15 @@ export const VERSION = '1.0.0';
  *    - K-means color clustering
  *    - Median cut quantization
  * 
- * 6. SVG Generation
+ * 6. SVG Refinement (NEW)
+ *    - Rasterize SVG paths to edge map
+ *    - Pixel-level accuracy comparison (precision/recall/F1)
+ *    - Snap-to-edge correction
+ *    - Spurious path removal
+ *    - Gap filling via connected components
+ *    - Adaptive re-simplification
+ * 
+ * 7. SVG Generation
  *    - Optimized path output
  *    - Layer group support
  *    - Metadata inclusion
