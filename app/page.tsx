@@ -13,19 +13,21 @@ import { Separator } from '@/components/ui/separator'
 import { Progress } from '@/components/ui/progress'
 import { Textarea } from '@/components/ui/textarea'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { 
-  Upload, 
-  Download, 
-  Settings, 
-  Image as ImageIcon, 
-  Code, 
-  Layers, 
+import {
+  Upload,
+  Download,
+  Settings,
+  Image as ImageIcon,
+  Code,
+  Layers,
   Palette,
   Loader2,
   CheckCircle,
   AlertCircle,
   Zap,
-  Info
+  Info,
+  Target,
+  TrendingUp
 } from 'lucide-react'
 
 // Types for our converter
@@ -41,6 +43,27 @@ interface ConversionResult {
     count: number
     percentage: number
   }>
+  refinement?: {
+    beforeScore: {
+      precision: number
+      recall: number
+      f1Score: number
+      meanDistanceError: number
+      matchedPixels: number
+      totalSvgPixels: number
+      totalRefPixels: number
+    }
+    afterScore: {
+      precision: number
+      recall: number
+      f1Score: number
+      meanDistanceError: number
+      matchedPixels: number
+      totalSvgPixels: number
+      totalRefPixels: number
+    }
+    iterationsUsed: number
+  } | null
 }
 
 interface ConversionProgress {
@@ -56,9 +79,9 @@ export default function CADToSVGPage() {
   const [isConverting, setIsConverting] = useState(false)
   const [progress, setProgress] = useState<ConversionProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
-  
+
   // Conversion options
-  const [edgeMethod, setEdgeMethod] = useState<string>('canny')
+  const [edgeMethod, setEdgeMethod] = useState<string>('skeleton')
   const [lowThreshold, setLowThreshold] = useState<number>(50)
   const [highThreshold, setHighThreshold] = useState<number>(150)
   const [gaussianBlur, setGaussianBlur] = useState<number>(1.4)
@@ -70,7 +93,13 @@ export default function CADToSVGPage() {
   const [smoothCurves, setSmoothCurves] = useState<boolean>(false)
   const [detectLayers, setDetectLayers] = useState<boolean>(true)
   const [invertColors, setInvertColors] = useState<boolean>(false)
-  
+
+  // Refinement options
+  const [refinementEnabled, setRefinementEnabled] = useState<boolean>(true)
+  const [targetAccuracy, setTargetAccuracy] = useState<number>(85)
+  const [maxIterations, setMaxIterations] = useState<number>(3)
+  const [snapRadius, setSnapRadius] = useState<number>(3)
+
   const fileInputRef = useRef<HTMLInputElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -123,7 +152,7 @@ export default function CADToSVGPage() {
       // Load image onto canvas for processing
       const img = new Image()
       img.crossOrigin = 'anonymous'
-      
+
       await new Promise<void>((resolve, reject) => {
         img.onload = () => resolve()
         img.onerror = () => reject(new Error('Failed to load image'))
@@ -171,6 +200,12 @@ export default function CADToSVGPage() {
             smoothCurves,
             detectLayers,
             invertColors,
+            refinement: {
+              enabled: refinementEnabled,
+              targetAccuracy: targetAccuracy / 100,
+              maxIterations,
+              snapRadius,
+            },
           },
         }),
       })
@@ -190,7 +225,7 @@ export default function CADToSVGPage() {
     } finally {
       setIsConverting(false)
     }
-  }, [originalImage, edgeMethod, lowThreshold, highThreshold, gaussianBlur, contourMethod, minArea, simplifyTolerance, strokeWidth, precision, smoothCurves, detectLayers, invertColors])
+  }, [originalImage, edgeMethod, lowThreshold, highThreshold, gaussianBlur, contourMethod, minArea, simplifyTolerance, strokeWidth, precision, smoothCurves, detectLayers, invertColors, refinementEnabled, targetAccuracy, maxIterations, snapRadius])
 
   // Download SVG
   const handleDownload = useCallback(() => {
@@ -252,11 +287,10 @@ export default function CADToSVGPage() {
               </CardHeader>
               <CardContent>
                 <div
-                  className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
-                    originalImage 
-                      ? 'border-green-500 bg-green-500/10' 
-                      : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700/50'
-                  }`}
+                  className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${originalImage
+                    ? 'border-green-500 bg-green-500/10'
+                    : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700/50'
+                    }`}
                   onDrop={handleDrop}
                   onDragOver={handleDragOver}
                   onClick={() => fileInputRef.current?.click()}
@@ -337,7 +371,7 @@ export default function CADToSVGPage() {
                 {/* Edge Detection */}
                 <div className="space-y-4">
                   <h4 className="text-sm font-medium text-slate-300">Edge Detection</h4>
-                  
+
                   <div className="space-y-2">
                     <Label className="text-slate-400">Method</Label>
                     <Select value={edgeMethod} onValueChange={setEdgeMethod}>
@@ -345,7 +379,8 @@ export default function CADToSVGPage() {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="canny">Canny (Recommended)</SelectItem>
+                        <SelectItem value="skeleton">Skeleton (Recommended)</SelectItem>
+                        <SelectItem value="canny">Canny</SelectItem>
                         <SelectItem value="sobel">Sobel</SelectItem>
                         <SelectItem value="prewitt">Prewitt</SelectItem>
                         <SelectItem value="roberts">Roberts Cross</SelectItem>
@@ -406,7 +441,7 @@ export default function CADToSVGPage() {
                 {/* Contour Detection */}
                 <div className="space-y-4">
                   <h4 className="text-sm font-medium text-slate-300">Contour Detection</h4>
-                  
+
                   <div className="space-y-2">
                     <Label className="text-slate-400">Method</Label>
                     <Select value={contourMethod} onValueChange={setContourMethod}>
@@ -455,7 +490,7 @@ export default function CADToSVGPage() {
                 {/* SVG Options */}
                 <div className="space-y-4">
                   <h4 className="text-sm font-medium text-slate-300">SVG Output</h4>
-                  
+
                   <div className="space-y-2">
                     <div className="flex justify-between">
                       <Label className="text-slate-400">Stroke Width</Label>
@@ -490,7 +525,7 @@ export default function CADToSVGPage() {
                 {/* Advanced Options */}
                 <div className="space-y-4">
                   <h4 className="text-sm font-medium text-slate-300">Advanced</h4>
-                  
+
                   <div className="flex items-center justify-between">
                     <Label className="text-slate-400">Smooth Curves</Label>
                     <Switch
@@ -514,6 +549,70 @@ export default function CADToSVGPage() {
                       onCheckedChange={setInvertColors}
                     />
                   </div>
+                </div>
+
+                <Separator className="bg-slate-700" />
+
+                {/* Refinement Options */}
+                <div className="space-y-4">
+                  <h4 className="text-sm font-medium text-slate-300 flex items-center gap-2">
+                    <Target className="w-4 h-4 text-purple-400" />
+                    Accuracy Refinement
+                  </h4>
+
+                  <div className="flex items-center justify-between">
+                    <Label className="text-slate-400">Enable Refinement</Label>
+                    <Switch
+                      checked={refinementEnabled}
+                      onCheckedChange={setRefinementEnabled}
+                    />
+                  </div>
+
+                  {refinementEnabled && (
+                    <>
+                      <div className="space-y-2">
+                        <div className="flex justify-between">
+                          <Label className="text-slate-400">Target Accuracy</Label>
+                          <span className="text-slate-500 text-sm">{targetAccuracy}%</span>
+                        </div>
+                        <Slider
+                          value={[targetAccuracy]}
+                          onValueChange={([v]) => setTargetAccuracy(v)}
+                          min={50}
+                          max={99}
+                          step={1}
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex justify-between">
+                          <Label className="text-slate-400">Max Iterations</Label>
+                          <span className="text-slate-500 text-sm">{maxIterations}</span>
+                        </div>
+                        <Slider
+                          value={[maxIterations]}
+                          onValueChange={([v]) => setMaxIterations(v)}
+                          min={1}
+                          max={10}
+                          step={1}
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex justify-between">
+                          <Label className="text-slate-400">Snap Radius</Label>
+                          <span className="text-slate-500 text-sm">{snapRadius}px</span>
+                        </div>
+                        <Slider
+                          value={[snapRadius]}
+                          onValueChange={([v]) => setSnapRadius(v)}
+                          min={1}
+                          max={10}
+                          step={1}
+                        />
+                      </div>
+                    </>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -568,7 +667,7 @@ export default function CADToSVGPage() {
                   <TabsContent value="result" className="mt-4">
                     <div className="bg-slate-900 rounded-lg p-4 min-h-[400px] flex items-center justify-center">
                       {result ? (
-                        <div 
+                        <div
                           className="max-w-full max-h-[600px] overflow-auto"
                           dangerouslySetInnerHTML={{ __html: result.svg }}
                         />
@@ -676,6 +775,93 @@ export default function CADToSVGPage() {
               </Card>
             )}
 
+            {/* Refinement Accuracy Metrics */}
+            {result?.refinement && (
+              <Card className="bg-slate-800/50 border-slate-700">
+                <CardHeader>
+                  <CardTitle className="text-white flex items-center gap-2">
+                    <TrendingUp className="w-5 h-5 text-purple-400" />
+                    Refinement Accuracy
+                  </CardTitle>
+                  <CardDescription className="text-slate-400">
+                    {result.refinement.iterationsUsed} refinement {result.refinement.iterationsUsed === 1 ? 'iteration' : 'iterations'} applied
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-5">
+                  {/* F1 Score — primary metric */}
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm font-medium text-slate-300">F1 Score (Overall)</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-500">{(result.refinement.beforeScore.f1Score * 100).toFixed(1)}%</span>
+                        <span className="text-slate-500">→</span>
+                        <span className={`text-sm font-semibold ${result.refinement.afterScore.f1Score >= 0.85 ? 'text-green-400' :
+                          result.refinement.afterScore.f1Score >= 0.65 ? 'text-yellow-400' : 'text-red-400'
+                          }`}>
+                          {(result.refinement.afterScore.f1Score * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    </div>
+                    <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all ${result.refinement.afterScore.f1Score >= 0.85 ? 'bg-gradient-to-r from-green-600 to-green-400' :
+                          result.refinement.afterScore.f1Score >= 0.65 ? 'bg-gradient-to-r from-yellow-600 to-yellow-400' :
+                            'bg-gradient-to-r from-red-600 to-red-400'
+                          }`}
+                        style={{ width: `${result.refinement.afterScore.f1Score * 100}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Precision & Recall side by side */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-xs text-slate-400">Precision</span>
+                        <span className="text-xs text-slate-300 font-medium">{(result.refinement.afterScore.precision * 100).toFixed(1)}%</span>
+                      </div>
+                      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-blue-500"
+                          style={{ width: `${result.refinement.afterScore.precision * 100}%` }}
+                        />
+                      </div>
+                      <p className="text-[10px] text-slate-500">Are SVG lines real?</p>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-xs text-slate-400">Recall</span>
+                        <span className="text-xs text-slate-300 font-medium">{(result.refinement.afterScore.recall * 100).toFixed(1)}%</span>
+                      </div>
+                      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-purple-500"
+                          style={{ width: `${result.refinement.afterScore.recall * 100}%` }}
+                        />
+                      </div>
+                      <p className="text-[10px] text-slate-500">Did SVG capture all lines?</p>
+                    </div>
+                  </div>
+
+                  {/* Additional metrics */}
+                  <div className="grid grid-cols-3 gap-3 pt-1">
+                    <div className="bg-slate-700/50 rounded-lg p-3 text-center">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-wide">Avg. Error</p>
+                      <p className="text-sm text-white font-medium mt-1">{result.refinement.afterScore.meanDistanceError.toFixed(2)}px</p>
+                    </div>
+                    <div className="bg-slate-700/50 rounded-lg p-3 text-center">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-wide">SVG Pixels</p>
+                      <p className="text-sm text-white font-medium mt-1">{result.refinement.afterScore.totalSvgPixels.toLocaleString()}</p>
+                    </div>
+                    <div className="bg-slate-700/50 rounded-lg p-3 text-center">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-wide">Ref Pixels</p>
+                      <p className="text-sm text-white font-medium mt-1">{result.refinement.afterScore.totalRefPixels.toLocaleString()}</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             {/* Features */}
             <Card className="bg-slate-800/50 border-slate-700">
               <CardHeader>
@@ -721,6 +907,16 @@ export default function CADToSVGPage() {
                       <li>• K-means clustering</li>
                       <li>• Median cut quantization</li>
                       <li>• Layer grouping</li>
+                    </ul>
+                  </div>
+                  <div className="space-y-3">
+                    <h4 className="text-sm font-medium text-purple-300">Accuracy Refinement</h4>
+                    <ul className="text-sm text-slate-400 space-y-1">
+                      <li>• Precision/Recall/F1 scoring</li>
+                      <li>• Snap-to-edge correction</li>
+                      <li>• Spurious path removal</li>
+                      <li>• Iterative improvement loop</li>
+                      <li>• Distance transform analysis</li>
                     </ul>
                   </div>
                 </div>

@@ -37,6 +37,24 @@ interface ConversionOptions {
   smoothCurves?: boolean;
   detectLayers?: boolean;
   invertColors?: boolean;
+  refinement?: {
+    enabled?: boolean;
+    targetAccuracy?: number;
+    maxIterations?: number;
+    snapRadius?: number;
+    spuriousThreshold?: number;
+    distanceTolerance?: number;
+  };
+}
+
+interface RefinementScore {
+  precision: number;
+  recall: number;
+  f1Score: number;
+  meanDistanceError: number;
+  matchedPixels: number;
+  totalSvgPixels: number;
+  totalRefPixels: number;
 }
 
 // ============================================================================
@@ -297,6 +315,40 @@ function binarize(
   return binary;
 }
 
+/**
+ * Dilate a binary (0/1) image by one iteration using 8-connectivity.
+ * Bridges small 1px gaps at corners and line junctions.
+ */
+function dilateBinary(
+  binary: Uint8ClampedArray,
+  width: number,
+  height: number
+): Uint8ClampedArray {
+  const result = new Uint8ClampedArray(binary);
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      if (binary[y * width + x] > 0) continue;
+
+      // Check 8-connected neighbors
+      let hasNeighbor = false;
+      for (let ky = -1; ky <= 1 && !hasNeighbor; ky++) {
+        for (let kx = -1; kx <= 1; kx++) {
+          if (binary[(y + ky) * width + (x + kx)] > 0) {
+            hasNeighbor = true;
+            break;
+          }
+        }
+      }
+      if (hasNeighbor) {
+        result[y * width + x] = 1;
+      }
+    }
+  }
+
+  return result;
+}
+
 function zhangSuenThinning(
   binary: Uint8ClampedArray,
   width: number,
@@ -428,16 +480,20 @@ function traceEdgeChain(
 
   let x = startX;
   let y = startY;
+  let lastDir = 0; // track last direction for continuity
 
   while (true) {
     points.push({ x, y });
     visited[y * width + x] = 1;
 
-    // Find next unvisited connected edge pixel
+    // Find next unvisited connected edge pixel, preferring directional continuity.
+    // Start scanning from the last direction taken so we follow the line
+    // smoothly rather than zig-zagging.
     let found = false;
     for (let i = 0; i < 8; i++) {
-      const nx = x + dx[i];
-      const ny = y + dy[i];
+      const dir = (lastDir + i) % 8;
+      const nx = x + dx[dir];
+      const ny = y + dy[dir];
       if (
         nx >= 0 && nx < width && ny >= 0 && ny < height &&
         binary[ny * width + nx] > 0 &&
@@ -445,6 +501,7 @@ function traceEdgeChain(
       ) {
         x = nx;
         y = ny;
+        lastDir = dir;
         found = true;
         break;
       }
@@ -521,6 +578,133 @@ function detectContours(
 }
 
 // ============================================================================
+// Chain Merging & Deduplication
+// ============================================================================
+
+/**
+ * Check whether a chain forms a closed loop.
+ * Returns true if start and end points are within `radius` pixels.
+ */
+function isChainClosed(points: Point[], radius: number = 3): boolean {
+  if (points.length < 4) return false;
+  const first = points[0];
+  const last = points[points.length - 1];
+  const dx = first.x - last.x;
+  const dy = first.y - last.y;
+  return Math.sqrt(dx * dx + dy * dy) <= radius;
+}
+
+/**
+ * Merge chains whose endpoints are within `maxGap` pixels of each other.
+ * This turns many short fragments into fewer coherent polylines.
+ */
+function mergeNearbyChains(contours: Point[][], maxGap: number = 4): Point[][] {
+  if (contours.length <= 1) return contours;
+
+  // Build a mutable list of chains
+  const chains: (Point[] | null)[] = contours.map(c => [...c]);
+  let merged = true;
+
+  while (merged) {
+    merged = false;
+    for (let i = 0; i < chains.length; i++) {
+      if (!chains[i]) continue;
+      const chainA = chains[i]!;
+
+      for (let j = i + 1; j < chains.length; j++) {
+        if (!chains[j]) continue;
+        const chainB = chains[j]!;
+
+        // Recompute endpoints each iteration (chainA may have grown)
+        const aStart = chainA[0];
+        const aEnd = chainA[chainA.length - 1];
+        const bStart = chainB[0];
+        const bEnd = chainB[chainB.length - 1];
+
+        // Try four possible join configurations
+        const d1 = Math.hypot(aEnd.x - bStart.x, aEnd.y - bStart.y); // A-end → B-start
+        const d2 = Math.hypot(aEnd.x - bEnd.x, aEnd.y - bEnd.y);     // A-end → B-end
+        const d3 = Math.hypot(aStart.x - bStart.x, aStart.y - bStart.y); // A-start → B-start
+        const d4 = Math.hypot(aStart.x - bEnd.x, aStart.y - bEnd.y); // A-start → B-end
+
+        const minD = Math.min(d1, d2, d3, d4);
+        if (minD > maxGap) continue;
+
+        // Merge whichever configuration is closest
+        if (minD === d1) {
+          // Append B after A
+          chainA.push(...chainB);
+        } else if (minD === d2) {
+          // Append reversed B after A
+          chainA.push(...chainB.reverse());
+        } else if (minD === d3) {
+          // Prepend reversed B before A
+          chainA.unshift(...chainB.reverse());
+        } else {
+          // Prepend B before A
+          chainA.unshift(...chainB);
+        }
+
+        chains[j] = null; // consumed
+        merged = true;
+      }
+    }
+  }
+
+  return chains.filter((c): c is Point[] => c !== null && c.length >= 3);
+}
+
+/**
+ * Remove near-duplicate contours.
+ * A contour is considered a duplicate if >80% of its points are within
+ * `radius` pixels of some point in another (longer) contour.
+ */
+function deduplicateContours(contours: Point[][], radius: number = 2): Point[][] {
+  if (contours.length <= 1) return contours;
+
+  // Sort descending by length so longer contours are preferred
+  const sorted = contours
+    .map((c, i) => ({ points: c, idx: i }))
+    .sort((a, b) => b.points.length - a.points.length);
+
+  const kept: Point[][] = [];
+  const removed = new Set<number>();
+
+  for (const entry of sorted) {
+    if (removed.has(entry.idx)) continue;
+
+    // Check if this is a near-duplicate of an already-kept contour
+    let isDupe = false;
+    for (const keptChain of kept) {
+      let matchCount = 0;
+      for (const p of entry.points) {
+        // Check if any point in the kept chain is nearby
+        let nearbyFound = false;
+        for (const kp of keptChain) {
+          if (Math.abs(p.x - kp.x) <= radius && Math.abs(p.y - kp.y) <= radius) {
+            nearbyFound = true;
+            break;
+          }
+        }
+        if (nearbyFound) matchCount++;
+      }
+      if (matchCount / entry.points.length > 0.8) {
+        isDupe = true;
+        break;
+      }
+    }
+
+    if (!isDupe) {
+      kept.push(entry.points);
+    } else {
+      removed.add(entry.idx);
+    }
+  }
+
+  return kept;
+}
+
+// ============================================================================
 // Path Simplification (Douglas-Peucker)
 // ============================================================================
 
@@ -591,6 +775,202 @@ function douglasPeucker(points: Point[], tolerance: number): Point[] {
 
   simplify(0, points.length - 1);
   return points.filter((_, i) => keep[i]);
+}
+
+// ============================================================================
+// Path Refinement
+// ============================================================================
+
+function computeDistanceTransform(
+  edges: Uint8ClampedArray,
+  width: number,
+  height: number
+): Float32Array {
+  const size = width * height;
+  const dist = new Float32Array(size);
+  const INF = width + height;
+
+  for (let i = 0; i < size; i++) {
+    dist[i] = edges[i] > 0 ? 0 : INF;
+  }
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (dist[idx] === 0) continue;
+      if (y > 0) dist[idx] = Math.min(dist[idx], dist[(y - 1) * width + x] + 1);
+      if (x > 0) dist[idx] = Math.min(dist[idx], dist[y * width + (x - 1)] + 1);
+      if (y > 0 && x > 0) dist[idx] = Math.min(dist[idx], dist[(y - 1) * width + (x - 1)] + 1.414);
+      if (y > 0 && x < width - 1) dist[idx] = Math.min(dist[idx], dist[(y - 1) * width + (x + 1)] + 1.414);
+    }
+  }
+
+  for (let y = height - 1; y >= 0; y--) {
+    for (let x = width - 1; x >= 0; x--) {
+      const idx = y * width + x;
+      if (dist[idx] === 0) continue;
+      if (y < height - 1) dist[idx] = Math.min(dist[idx], dist[(y + 1) * width + x] + 1);
+      if (x < width - 1) dist[idx] = Math.min(dist[idx], dist[y * width + (x + 1)] + 1);
+      if (y < height - 1 && x < width - 1) dist[idx] = Math.min(dist[idx], dist[(y + 1) * width + (x + 1)] + 1.414);
+      if (y < height - 1 && x > 0) dist[idx] = Math.min(dist[idx], dist[(y + 1) * width + (x - 1)] + 1.414);
+    }
+  }
+
+  return dist;
+}
+
+function rasterizeContours(
+  contours: Point[][],
+  width: number,
+  height: number
+): Uint8ClampedArray {
+  const result = new Uint8ClampedArray(width * height);
+  for (const points of contours) {
+    for (let i = 0; i < points.length - 1; i++) {
+      drawBresenhamLine(result, width, height, points[i], points[i + 1]);
+    }
+  }
+  return result;
+}
+
+function drawBresenhamLine(
+  buffer: Uint8ClampedArray, w: number, h: number, p0: Point, p1: Point
+): void {
+  let x0 = Math.round(p0.x), y0 = Math.round(p0.y);
+  const x1 = Math.round(p1.x), y1 = Math.round(p1.y);
+  const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx - dy;
+  while (true) {
+    if (x0 >= 0 && x0 < w && y0 >= 0 && y0 < h) buffer[y0 * w + x0] = 255;
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 < dx) { err += dx; y0 += sy; }
+  }
+}
+
+function computeAccuracy(
+  refEdges: Uint8ClampedArray,
+  svgEdges: Uint8ClampedArray,
+  width: number,
+  height: number,
+  tolerance: number
+): RefinementScore {
+  const refDT = computeDistanceTransform(refEdges, width, height);
+  const svgDT = computeDistanceTransform(svgEdges, width, height);
+  const size = width * height;
+  let totalSvg = 0, totalRef = 0, svgMatched = 0, refMatched = 0, totalDist = 0;
+
+  for (let i = 0; i < size; i++) {
+    if (svgEdges[i] > 0) {
+      totalSvg++;
+      totalDist += refDT[i];
+      if (refDT[i] <= tolerance) svgMatched++;
+    }
+    if (refEdges[i] > 0) {
+      totalRef++;
+      if (svgDT[i] <= tolerance) refMatched++;
+    }
+  }
+
+  const precision = totalSvg > 0 ? svgMatched / totalSvg : 0;
+  const recall = totalRef > 0 ? refMatched / totalRef : 0;
+  const f1Score = (precision + recall) > 0 ? 2 * precision * recall / (precision + recall) : 0;
+  return {
+    precision, recall, f1Score,
+    meanDistanceError: totalSvg > 0 ? totalDist / totalSvg : 0,
+    matchedPixels: svgMatched, totalSvgPixels: totalSvg, totalRefPixels: totalRef,
+  };
+}
+
+function snapContoursToEdges(
+  contours: Point[][],
+  refEdges: Uint8ClampedArray,
+  width: number,
+  height: number,
+  radius: number
+): Point[][] {
+  return contours.map(points => points.map(pt => {
+    const px = Math.round(pt.x), py = Math.round(pt.y);
+    if (px >= 0 && px < width && py >= 0 && py < height && refEdges[py * width + px] > 0) return pt;
+    let bestDist = Infinity, bestX = pt.x, bestY = pt.y;
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        const nx = px + dx, ny = py + dy;
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height && refEdges[ny * width + nx] > 0) {
+          const d = dx * dx + dy * dy;
+          if (d < bestDist) { bestDist = d; bestX = nx; bestY = ny; }
+        }
+      }
+    }
+    return { x: bestX, y: bestY };
+  }));
+}
+
+function removeSpuriousContours(
+  contours: Point[][],
+  refEdges: Uint8ClampedArray,
+  width: number,
+  height: number,
+  threshold: number,
+  checkRadius: number
+): Point[][] {
+  return contours.filter(points => {
+    if (points.length < 3) return false;
+    let unmatched = 0;
+    for (const pt of points) {
+      const px = Math.round(pt.x), py = Math.round(pt.y);
+      let found = false;
+      for (let dy = -checkRadius; dy <= checkRadius && !found; dy++) {
+        for (let dx = -checkRadius; dx <= checkRadius; dx++) {
+          const nx = px + dx, ny = py + dy;
+          if (nx >= 0 && nx < width && ny >= 0 && ny < height && refEdges[ny * width + nx] > 0) {
+            found = true; break;
+          }
+        }
+      }
+      if (!found) unmatched++;
+    }
+    return (unmatched / points.length) < threshold;
+  });
+}
+
+function refineContours(
+  contours: Point[][],
+  refEdges: Uint8ClampedArray,
+  width: number,
+  height: number,
+  options: NonNullable<ConversionOptions['refinement']>
+): { contours: Point[][]; beforeScore: RefinementScore; afterScore: RefinementScore; iterationsUsed: number } {
+  const targetAccuracy = options.targetAccuracy ?? 0.85;
+  const maxIterations = options.maxIterations ?? 3;
+  const snapRadius = options.snapRadius ?? 3;
+  const spuriousThreshold = options.spuriousThreshold ?? 0.7;
+  const distanceTolerance = options.distanceTolerance ?? 2;
+
+  const initialEdges = rasterizeContours(contours, width, height);
+  const beforeScore = computeAccuracy(refEdges, initialEdges, width, height, distanceTolerance);
+
+  let current = contours;
+  let currentScore = { ...beforeScore };
+  let iterationsUsed = 0;
+
+  for (let iter = 0; iter < maxIterations; iter++) {
+    if (currentScore.f1Score >= targetAccuracy) break;
+    iterationsUsed = iter + 1;
+
+    if (currentScore.precision < targetAccuracy) {
+      current = removeSpuriousContours(current, refEdges, width, height, spuriousThreshold, distanceTolerance);
+    }
+
+    current = snapContoursToEdges(current, refEdges, width, height, snapRadius);
+
+    const refined = rasterizeContours(current, width, height);
+    currentScore = computeAccuracy(refEdges, refined, width, height, distanceTolerance);
+  }
+
+  return { contours: current, beforeScore, afterScore: currentScore, iterationsUsed };
 }
 
 // ============================================================================
@@ -832,6 +1212,14 @@ export async function POST(request: NextRequest) {
       smoothCurves: options.smoothCurves || false,
       detectLayers: options.detectLayers ?? true,
       invertColors: options.invertColors || false,
+      refinement: {
+        enabled: options.refinement?.enabled ?? true,
+        targetAccuracy: options.refinement?.targetAccuracy ?? 0.85,
+        maxIterations: options.refinement?.maxIterations ?? 3,
+        snapRadius: options.refinement?.snapRadius ?? 3,
+        spuriousThreshold: options.refinement?.spuriousThreshold ?? 0.7,
+        distanceTolerance: options.refinement?.distanceTolerance ?? 2,
+      },
     };
 
     // Convert array back to Uint8ClampedArray
@@ -858,15 +1246,19 @@ export async function POST(request: NextRequest) {
 
     if (method === 'skeleton') {
       // 1. Binarize (Thresholding)
-      // Invert logic: lines are dark, background is light -> lines become 1, background 0
-      const binary = binarize(data, width, height, 128);
+      // Use a generous threshold (192) to capture anti-aliased edge pixels.
+      // Lines are dark, background is light -> lines become 1, background 0
+      const binary = binarize(data, width, height, 192);
 
-      // 2. Skeletonize (Zhang-Suen Thinning)
-      edges = zhangSuenThinning(binary, width, height);
+      // 2. Small dilation to bridge 1px gaps at corners before thinning
+      const dilated = dilateBinary(binary, width, height);
+
+      // 3. Skeletonize (Zhang-Suen Thinning)
+      edges = zhangSuenThinning(dilated, width, height);
 
     } else {
       // 1. Canny Edge Detection (fallback)
-      edges = cannyEdgeDetection(
+      const cannyEdges = cannyEdgeDetection(
         data,
         width,
         height,
@@ -874,14 +1266,31 @@ export async function POST(request: NextRequest) {
         opts.edgeDetection!.highThreshold!,
         opts.edgeDetection!.gaussianBlur!
       );
+
+      // 2. Apply Zhang-Suen thinning to collapse Canny's double-sided edges
+      // into single-pixel centerlines. Canny detects edges on BOTH sides
+      // of each line, so thinning merges them into one trace.
+      const binaryEdges = new Uint8ClampedArray(width * height);
+      for (let i = 0; i < cannyEdges.length; i++) {
+        binaryEdges[i] = cannyEdges[i] > 0 ? 1 : 0;
+      }
+      edges = zhangSuenThinning(binaryEdges, width, height);
     }
 
     // Contour detection via edge chain tracing (produces single-line paths)
     let contours = detectContours(edges, width, height);
 
+    // Merge nearby chain endpoints BEFORE filtering by minArea.
+    // This allows short fragments at corners to be joined into longer chains
+    // before the length filter removes them.
+    contours = mergeNearbyChains(contours, 5);
+
     // Filter by minimum point count (perimeter-based for edge chains)
     const minArea = opts.contourDetection!.minArea!;
     contours = contours.filter(points => points.length >= Math.max(minArea, 4));
+
+    // Remove near-duplicate overlapping contours
+    contours = deduplicateContours(contours, 2);
 
     // Simplify paths
     const tolerance = opts.contourDetection!.tolerance!;
@@ -890,7 +1299,7 @@ export async function POST(request: NextRequest) {
     // Assign colors to contours
     const colorGroups = new Map<string, { color: Color; count: number }>();
 
-    const coloredContours = contours.map(points => {
+    let coloredContoursResult = contours.map(points => {
       const sampledColor = sampleColorAlongPath(data, width, height, points);
       const assignedColor = findNearestColor(sampledColor, lineColors);
 
@@ -905,16 +1314,54 @@ export async function POST(request: NextRequest) {
       return { points, color: assignedColor };
     });
 
+    // Refinement step
+    let refinementData: { beforeScore: RefinementScore; afterScore: RefinementScore; iterationsUsed: number } | null = null;
+
+    if (opts.refinement?.enabled !== false) {
+      const result = refineContours(
+        contours,
+        edges,
+        width,
+        height,
+        opts.refinement!
+      );
+      contours = result.contours;
+      refinementData = {
+        beforeScore: result.beforeScore,
+        afterScore: result.afterScore,
+        iterationsUsed: result.iterationsUsed,
+      };
+
+      // Re-assign colors after refinement
+      coloredContoursResult = contours.map(points => {
+        const sampledColor = sampleColorAlongPath(data, width, height, points);
+        const assignedColor = findNearestColor(sampledColor, lineColors);
+
+        const key = `${assignedColor.r}-${assignedColor.g}-${assignedColor.b}`;
+        const existing = colorGroups.get(key);
+        if (existing) {
+          existing.count++;
+        } else {
+          colorGroups.set(key, { color: assignedColor, count: 1 });
+        }
+
+        return { points, color: assignedColor };
+      });
+    }
+
     // Generate SVG
     const strokeWidth = opts.svg!.strokeWidth!;
     const precision = opts.svg!.precision!;
 
     let paths = '';
-    for (let i = 0; i < coloredContours.length; i++) {
-      const { points, color } = coloredContours[i];
-      const d = pointsToPathString(points, false, precision);
+    for (let i = 0; i < coloredContoursResult.length; i++) {
+      const { points, color } = coloredContoursResult[i];
+      // Only close paths that actually form a closed loop
+      const closed = isChainClosed(points, 3);
+      const d = pointsToPathString(points, closed, precision);
       const hexColor = colorToHex(color.r, color.g, color.b);
-      paths += `<path d="${d}" stroke="${hexColor}" stroke-width="${strokeWidth}" fill="none"/>\n`;
+      // Add stroke-linecap and stroke-linejoin for clean rendering
+      paths += `<path d="${d}" stroke="${hexColor}" stroke-width="${strokeWidth}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>\n`;
     }
 
     const svg = `<?xml version="1.0" encoding="UTF-8"?>
@@ -936,6 +1383,7 @@ ${paths}</svg>`;
       layerCount: colorGroups.size,
       conversionTime: 0,
       colorGroups: colorGroupsArray,
+      refinement: refinementData,
     });
 
   } catch (error) {
